@@ -1,0 +1,39 @@
+# Example: run bwgate against an existing self-hosted Vaultwarden.
+# Secrets are mounted as files and referenced via *_FILE so they never appear
+# in `docker inspect` / process listings.
+services:
+  bwgate:
+    build: .
+    image: bwgate:0.1.0
+    restart: unless-stopped
+    # Bind only to localhost on the host by default.
+    ports:
+      - "127.0.0.1:8099:8099"
+    environment:
+      BWGATE_ADDR: "0.0.0.0:8099"          # inside the container
+      BW_SERVER: "https://vault.example.com"
+      BW_EMAIL: "you@example.com"
+      BW_PASSWORD_FILE: "/run/secrets/bw_password"
+      TELEGRAM_BOT_TOKEN_FILE: "/run/secrets/tg_token"
+      TELEGRAM_OWNER_USER_ID: "11111111"
+      BWGATE_AGENT_TOKENS_FILE: "/run/secrets/agent_tokens"
+      BWGATE_APPROVAL_TIMEOUT_SEC: "120"
+      BWGATE_AUDIT_LOG: "/data/audit.log"
+      TZ: "Europe/London"
+    volumes:
+      - bwgate-data:/data
+    secrets:
+      - bw_password
+      - tg_token
+      - agent_tokens
+
+secrets:
+  bw_password:
+    file: ./secrets/bw_password
+  tg_token:
+    file: ./secrets/tg_token
+  agent_tokens:
+    file: ./secrets/agent_tokens   # contents: "deployer:<hex>,ci:<hex>"
+
+volumes:
+  bwgate-data:

@@ -1,0 +1,7 @@
+/bwgate
+/dist/
+*.log
+.env
+*.env
+secrets/
+audit.log

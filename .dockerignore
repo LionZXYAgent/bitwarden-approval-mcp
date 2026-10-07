@@ -1,0 +1,7 @@
+.git
+*.md
+deploy/
+test/
+*_test.go
+.env
+*.log

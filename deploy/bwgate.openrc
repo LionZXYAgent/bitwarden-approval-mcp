@@ -1,0 +1,42 @@
+#!/sbin/openrc-run
+# OpenRC service for the Bitwarden approval MCP gateway.
+# Install as /etc/init.d/bwgate, then:  rc-update add bwgate default
+#
+# Secrets are read from files referenced by *_FILE variables in
+# /etc/bwgate/bwgate.env so they never appear in the process listing or logs.
+
+name="bwgate"
+description="Bitwarden vault access MCP server with Telegram approval"
+command="/usr/local/bin/bwgate"
+command_user="bwgate:bwgate"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/bwgate/bwgate.log"
+error_log="/var/log/bwgate/bwgate.log"
+
+# Load environment (including *_FILE pointers to secret files).
+: "${BWGATE_ENV_FILE:=/etc/bwgate/bwgate.env}"
+export_env() {
+    if [ -r "${BWGATE_ENV_FILE}" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "${BWGATE_ENV_FILE}"
+        set +a
+    fi
+}
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    export_env
+    checkpath -d -o bwgate:bwgate -m 0750 /var/log/bwgate
+    checkpath -d -o bwgate:bwgate -m 0750 /var/lib/bwgate
+}
+
+stop_post() {
+    ebegin "bwgate stopped; vault session cleared from memory"
+    eend 0
+}
