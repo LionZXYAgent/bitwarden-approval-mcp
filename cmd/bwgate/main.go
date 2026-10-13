@@ -90,8 +90,12 @@ func run() error {
 	}
 	mgr := approval.NewManager(tg, approval.Config{
 		OwnerUserID: cfg.OwnerUserID, OwnerChatID: cfg.OwnerChatID, Timeout: cfg.Timeout,
-		MaxPendingPerAgent: cfg.MaxPendingPerAgent, MaxPendingTotal: cfg.MaxPendingTotal, Location: loc,
+		GrantsFile: cfg.GrantsFile, MaxPendingPerAgent: cfg.MaxPendingPerAgent, MaxPendingTotal: cfg.MaxPendingTotal, Location: loc,
 	}, al, log)
+
+	if err := mgr.LoadGrants(); err != nil {
+		return fmt.Errorf("load saved approvals: %w", err)
+	}
 
 	tokens := map[string]string{}
 	for _, a := range cfg.Agents {

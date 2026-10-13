@@ -1,20 +1,20 @@
 # bitwarden-approval-mcp (`bwgate`)
 
 A small, single-binary **MCP server that gates Bitwarden / Vaultwarden vault
-access behind per-request human approval on Telegram.** When an agent asks for a
-credential, the owner gets a Telegram message with **Allow / Decline** buttons
-and full context (who is asking, which item, which fields, why). The secret is
-returned to the agent **only** after the owner taps *Allow* — and the secret
-value is never sent to Telegram or written to the audit log.
+access behind human approval on Telegram.** When an agent asks for a credential,
+the owner gets a Telegram message with the agent, item, fields, and reason.
+The owner can approve once, for 15 minutes, for 1 hour, or forever.
+Saved approvals cover only that agent, item, and approved fields.
+Secret values never go to Telegram or the audit log.
 
 Built for the OpenClaw "working agents need secrets, but not standing access to
 my whole vault" use case. Runs as a static binary on Alpine (musl), ~9 MB
 binary / ~19 MB image, no Node.js and no `bw` CLI required.
 
 ```
-agent ──MCP(HTTP+bearer)──▶ bwgate ──▶ Telegram "Allow/Decline?" ──▶ owner's phone
+agent ──MCP(HTTP+bearer)──▶ bwgate ──▶ Telegram approval prompt ──▶ owner's phone
                               │                                           │
-                              └────────── secret released only on Allow ──┘
+                              └────────── secret released only with approval ──┘
    bwgate keeps the vault unlocked in memory; it talks to Bitwarden's API directly.
 ```
 
@@ -29,17 +29,21 @@ image. See [Testing](#testing).
 
 ## Features
 
-- **Human-in-the-loop on every credential read.** `get_credential` and
-  `get_totp` block until the owner approves on Telegram or the request times out.
+- **Owner-controlled credential reads.** `get_credential` and `get_totp` require
+  an active saved approval or a new decision on Telegram. The owner can approve
+  once, for 15 minutes, for 1 hour, or forever.
 - **Metadata search is separate from secret access.** `search_items` returns
   names, URLs, folders and *which* fields exist — never values — and can be left
   ungated so agents can discover item ids without pinging your phone.
 - **Secrets never touch Telegram or logs.** The approval message and audit log
   only ever contain metadata (item name, field names, reason, request id).
-- **Owner-only, single-use, time-boxed approvals.** Button presses are accepted
-  only from the configured Telegram user id; callback data is a 128-bit random
-  nonce; each request resolves exactly once; unanswered requests auto-decline
-  after a configurable timeout; the message is edited to show the outcome.
+- **Owner-only decisions.** Only the configured Telegram user can approve.
+  Each button uses a random 128-bit nonce and resolves its request once.
+  Unanswered requests expire after a configurable timeout.
+- **Saved approvals with a limited scope.** Approvals cover the authenticated
+  agent, stable item ID, and individual fields. Timed approvals expire without
+  extending on reuse. Saved approvals survive restarts and contain no secrets.
+  Item policy and rate limits still apply to every read.
 - **Per-agent bearer tokens**, localhost bind by default, item allow/deny lists,
   per-agent rate limiting, and a JSON-lines audit log.
 - **TOTP done right:** the `totp` field returns a *generated 6-digit code*, not
@@ -54,8 +58,8 @@ image. See [Testing](#testing).
 | Tool | Gated? | Returns |
 | --- | --- | --- |
 | `search_items` | No (configurable via `BWGATE_LIST_UNGATED`) | Item metadata: id, name, type, folder, org, URIs, and `available_fields`. No secrets. |
-| `get_credential` | **Yes** | Requested fields (`username`, `password`, `totp`, `notes`, `uris`, `field:<name>`) after owner approval. |
-| `get_totp` | **Yes** | The current TOTP code and seconds remaining, after owner approval. |
+| `get_credential` | **Yes** | Requested fields (`username`, `password`, `totp`, `notes`, `uris`, `field:<name>`) after a new or saved owner approval. |
+| `get_totp` | **Yes** | The current TOTP code and seconds remaining, after a new or saved owner approval. |
 
 `get_credential` / `get_totp` arguments: `item` (id or exact name), `fields`
 (for `get_credential`), and a `reason` string that is shown to the owner.
@@ -171,6 +175,7 @@ TELEGRAM_OWNER_USER_ID=11111111
 BWGATE_AGENT_TOKENS_FILE=/etc/bwgate/secrets/agent_tokens
 BWGATE_ADDR=127.0.0.1:8099
 BWGATE_AUDIT_LOG=/var/lib/bwgate/audit.log
+BWGATE_APPROVALS_FILE=/var/lib/bwgate/approvals.json
 ENV
 chown bwgate:bwgate /etc/bwgate/bwgate.env /etc/bwgate/secrets/*
 chmod 600 /etc/bwgate/bwgate.env /etc/bwgate/secrets/*
@@ -260,7 +265,8 @@ environment and `docker inspect`.
 | `BWGATE_AGENTS_FILE` | – | – | Alternative: one `name:token` per line. |
 | `BWGATE_ADDR` | – | `127.0.0.1:8099` | Bind address. Localhost by default. |
 | `BWGATE_TRANSPORT` | – | `http` | `http`, `stdio`, or `both`. |
-| `BWGATE_APPROVAL_TIMEOUT_SEC` | – | `120` | Auto-decline after this long. |
+| `BWGATE_APPROVAL_TIMEOUT_SEC` | – | `120` | Auto-decline unanswered prompts after this long. |
+| `BWGATE_APPROVALS_FILE` | – | `approvals.json` | File for saved approvals. Its directory must exist and be writable. Use persistent storage. |
 | `BWGATE_LIST_UNGATED` | – | `true` | If `false`, `search_items` is unavailable (list via gated reads only). |
 | `BWGATE_ALLOWLIST` / `BWGATE_DENYLIST` | – | – | Comma-separated globs matched on item name or id; **deny wins**. Empty allowlist = allow all. |
 | `BWGATE_MAX_PENDING_PER_AGENT` | – | `3` | Back-pressure per agent. |
@@ -284,11 +290,28 @@ Reason: deploy release v2 to prod
 
 Request 6ommlg · 2026-10-07 20:35:06 BST
 Expires in 2m0s. No secret values are shown here.
-      [ ✅ Allow ]   [ ⛔ Decline ]
+Saved approvals cover only this agent, item, and these fields.
+      [ ✅ Allow once ]
+      [ Approve for 15 min ]
+      [ Approve for 1h ]
+      [ Approve forever ]
+      [ ⛔ Decline ]
 ```
 
 After a decision the same message is edited to `✅ ALLOWED` / `⛔ DECLINED` /
-`⌛ TIMED OUT`, with the request id and who approved.
+`⌛ TIMED OUT`, with the request ID, approver, and approval duration.
+
+The 15-minute and 1-hour periods start when the owner presses the button.
+Later reads of approved fields return without a new prompt until approval expires.
+A request for additional fields still requires approval.
+A saved `totp` approval covers both `get_totp` and the `totp` field of `get_credential`.
+New reads fetch current vault values, not cached secret values.
+
+Forever approvals have no expiry and survive restarts.
+To revoke saved approvals, stop `bwgate`, delete `BWGATE_APPROVALS_FILE`, then start `bwgate`.
+The next read requires a new approval. Existing copies of released secrets remain with their recipients.
+The file contains permission metadata only and uses mode `0600`.
+If a saved approval cannot be written, the request stays pending. The owner can retry or choose Allow once.
 
 ---
 
@@ -364,15 +387,16 @@ log. No real credentials are used.
 
 **What it protects.** Agents never hold your master password or a standing vault
 session. They get individual fields, one approval at a time, scoped by allow/deny
-lists and rate limits. Every release requires a fresh human tap, and the agent
-only ever sees the fields it asked for.
+lists and rate limits. Each read requires a new decision or an active saved approval.
+The agent only receives the fields that it requests.
+Saved approvals do not extend to other agents, items, or unapproved fields.
 
 - **Secrets stay off Telegram and off disk logs.** Only metadata is sent to
   Telegram or written to the audit log. Verified by tests.
 - **The approval channel is authenticated.** Only `TELEGRAM_OWNER_USER_ID` can
   approve; other users' presses are logged (`wrong_user_press`) and refused.
-  Callback data is a random 128-bit nonce, so buttons can't be guessed/replayed,
-  and each request is single-use and time-boxed.
+  Callback data uses a random 128-bit nonce. A button cannot resolve its request
+  twice or create an approval after the prompt expires.
 - **Agents are authenticated** with per-agent bearer tokens (constant-time
   compare). Default bind is localhost; the HTTP handler also applies the MCP
   SDK's DNS-rebinding/cross-origin protections.

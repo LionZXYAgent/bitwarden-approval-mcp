@@ -1,6 +1,5 @@
-// Package approval implements the human-in-the-loop gate: every credential
-// request is sent to the owner on Telegram with Allow/Decline buttons and is
-// resolved exactly once (allow, decline, timeout or cancellation).
+// Package approval gates credential requests with owner approval on Telegram.
+// Approvals can cover one request or specific fields for a chosen duration.
 package approval
 
 import (
@@ -65,12 +64,14 @@ type Request struct {
 	Created time.Time
 	Expires time.Time
 
-	nonce     string
-	decidedBy int64
-	messageID int
-	outcome   Outcome
-	done      chan struct{}
-	timer     *time.Timer
+	nonce        string
+	decidedBy    int64
+	messageID    int
+	grantUntil   time.Time
+	grantForever bool
+	outcome      Outcome
+	done         chan struct{}
+	timer        *time.Timer
 }
 
 // Config for the manager.
@@ -81,6 +82,7 @@ type Config struct {
 	MaxPendingPerAgent int
 	MaxPendingTotal    int
 	Location           *time.Location
+	GrantsFile         string // empty keeps grants in memory (tests/embedded use)
 }
 
 // Manager coordinates approval requests and the Telegram update loop.
@@ -94,6 +96,7 @@ type Manager struct {
 	byID    map[string]*Request
 	byNonce map[string]*Request
 	locked  bool
+	grants  map[grantKey]grant
 	offset  int64
 }
 
@@ -115,7 +118,7 @@ func NewManager(bot Bot, cfg Config, al *audit.Logger, log *slog.Logger) *Manage
 		log = slog.Default()
 	}
 	return &Manager{cfg: cfg, bot: bot, audit: al, log: log,
-		byID: map[string]*Request{}, byNonce: map[string]*Request{}}
+		byID: map[string]*Request{}, byNonce: map[string]*Request{}, grants: map[grantKey]grant{}}
 }
 
 func randToken(n int) string {
@@ -148,13 +151,28 @@ func sanitize(s string, max int) string {
 	return s
 }
 
-// Request sends an approval request and blocks until it is resolved, the
-// context is cancelled, or the timeout fires. It returns the final outcome.
+// Request reuses an active saved approval or sends a Telegram prompt and
+// blocks until a decision, cancellation, or timeout.
 func (m *Manager) Request(ctx context.Context, r *Request) (Outcome, error) {
+	if err := ctx.Err(); err != nil {
+		return Cancelled, err
+	}
 	m.mu.Lock()
 	if m.locked {
 		m.mu.Unlock()
 		return Cancelled, ErrLocked
+	}
+	if g, ok := m.matchGrantLocked(r, time.Now()); ok {
+		r.ID = randToken(6)
+		r.Created = time.Now()
+		r.outcome = Approved
+		r.decidedBy = g.ByUser
+		m.mu.Unlock()
+		m.audit.Log(audit.Event{Event: "approval_reused", RequestID: r.ID, Agent: r.Agent,
+			Client: r.Client, Remote: r.Remote, Tool: r.Tool, ItemID: r.ItemID,
+			ItemName: r.ItemName, Fields: r.Fields, Reason: r.Reason,
+			Outcome: string(Approved), TelegramUser: g.ByUser})
+		return Approved, nil
 	}
 	total, perAgent := 0, 0
 	for _, x := range m.byID {
@@ -184,7 +202,10 @@ func (m *Manager) Request(ctx context.Context, r *Request) (Outcome, error) {
 		Reason: r.Reason, Outcome: string(Pending)})
 
 	msgID, err := m.bot.SendMessage(ctx, m.cfg.OwnerChatID, m.renderPrompt(r), []telegram.Button{
-		{Text: "✅ Allow", CallbackData: "a:" + r.nonce},
+		{Text: "✅ Allow once", CallbackData: "a:" + r.nonce},
+		{Text: "Approve for 15 min", CallbackData: "a15:" + r.nonce},
+		{Text: "Approve for 1h", CallbackData: "a60:" + r.nonce},
+		{Text: "Approve forever", CallbackData: "af:" + r.nonce},
 		{Text: "⛔ Decline", CallbackData: "d:" + r.nonce},
 	})
 	if err != nil {
@@ -224,11 +245,28 @@ func (m *Manager) Request(ctx context.Context, r *Request) (Outcome, error) {
 // resolve transitions a pending request to a terminal outcome exactly once.
 // byUser is the Telegram user id that pressed the button (0 for system events).
 func (m *Manager) resolve(nonce string, out Outcome, byUser int64) {
+	_ = m.resolveWithGrant(nonce, out, byUser, 0, false)
+}
+
+// resolveWithGrant stores a grant and resolves its request in one critical section.
+func (m *Manager) resolveWithGrant(nonce string, out Outcome, byUser int64, duration time.Duration, forever bool) error {
 	m.mu.Lock()
 	r := m.byNonce[nonce]
 	if r == nil || r.outcome != Pending {
 		m.mu.Unlock()
-		return
+		return ErrUnknownRequest
+	}
+	if out == Approved && (m.locked || !time.Now().Before(r.Expires)) {
+		m.mu.Unlock()
+		return ErrUnknownRequest
+	}
+	if out == Approved && (duration > 0 || forever) {
+		if err := m.addGrantLocked(r, byUser, duration, forever); err != nil {
+			m.mu.Unlock()
+			m.audit.Log(audit.Event{Event: "grant_error", RequestID: r.ID, Outcome: "rejected"})
+			m.log.Error("save approval grant failed", "err", err)
+			return err
+		}
 	}
 	m.finishLocked(r, out, "")
 	r.decidedBy = byUser
@@ -237,7 +275,7 @@ func (m *Manager) resolve(nonce string, out Outcome, byUser int64) {
 	m.mu.Unlock()
 
 	m.audit.Log(audit.Event{Event: "decision", RequestID: r.ID, Agent: r.Agent, Tool: r.Tool,
-		ItemID: r.ItemID, ItemName: r.ItemName, Fields: r.Fields, Outcome: string(out), TelegramUser: byUser})
+		ItemID: r.ItemID, ItemName: r.ItemName, Fields: r.Fields, Outcome: string(out), TelegramUser: byUser, Detail: grantDetail(r)})
 	if msgID != 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -245,6 +283,7 @@ func (m *Manager) resolve(nonce string, out Outcome, byUser int64) {
 			m.log.Warn("edit telegram message failed", "err", err)
 		}
 	}
+	return nil
 }
 
 func (m *Manager) finish(r *Request, out Outcome, _ string) {
@@ -269,6 +308,10 @@ func (m *Manager) finishLocked(r *Request, out Outcome, _ string) {
 func (m *Manager) Lock() {
 	m.mu.Lock()
 	m.locked = true
+	if err := m.saveGrantsLocked(map[grantKey]grant{}); err != nil {
+		m.log.Error("clear saved approvals failed; access remains locked", "err", err)
+	}
+	clear(m.grants)
 	var pend []*Request
 	for _, r := range m.byID {
 		if r.outcome == Pending {
@@ -317,7 +360,7 @@ func (m *Manager) renderPrompt(r *Request) string {
 		b.WriteString("⚠️ This item is marked “master-password re-prompt”.\n")
 	}
 	fmt.Fprintf(&b, "\nRequest %s · %s\n", r.ID, r.Created.In(m.cfg.Location).Format("2006-01-02 15:04:05 MST"))
-	fmt.Fprintf(&b, "Expires in %s. No secret values are shown here.", m.cfg.Timeout.Round(time.Second))
+	fmt.Fprintf(&b, "Expires in %s. No secret values are shown here.\nSaved approvals cover only this agent, item, and these fields.", m.cfg.Timeout.Round(time.Second))
 	return b.String()
 }
 
@@ -336,6 +379,9 @@ func (m *Manager) renderResult(r *Request, out Outcome, byUser int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\nItem: %s\nFields: %s\nAgent: %s\nRequest %s\n",
 		head, sanitize(r.ItemName, 120), sanitize(strings.Join(r.Fields, ", "), 120), sanitize(r.Agent, 80), r.ID)
+	if out == Approved {
+		fmt.Fprintln(&b, grantDetail(r))
+	}
 	if byUser != 0 {
 		fmt.Fprintf(&b, "By: Telegram user %d\n", byUser)
 	}
@@ -358,26 +404,32 @@ func (m *Manager) handleCallback(ctx context.Context, cq *telegram.CallbackQuery
 		_ = m.bot.AnswerCallbackQuery(ctx, cq.ID, "You are not authorised to approve these requests.")
 		return
 	}
-	m.mu.Lock()
-	r := m.byNonce[nonce]
-	known := r != nil && r.outcome == Pending
-	m.mu.Unlock()
-	if !known {
-		_ = m.bot.AnswerCallbackQuery(ctx, cq.ID, "This request is no longer pending.")
-		return
-	}
 	var out Outcome
 	var toast string
+	var duration time.Duration
+	var forever bool
 	switch action {
 	case "a":
-		out, toast = Approved, "Allowed."
+		out, toast = Approved, "Allowed once."
+	case "a15":
+		out, toast, duration = Approved, "Approved for 15 min.", 15*time.Minute
+	case "a60":
+		out, toast, duration = Approved, "Approved for 1h.", time.Hour
+	case "af":
+		out, toast, forever = Approved, "Approved forever.", true
 	case "d":
 		out, toast = Declined, "Declined."
 	default:
 		return
 	}
+	if err := m.resolveWithGrant(nonce, out, cq.From.ID, duration, forever); err != nil {
+		if errors.Is(err, ErrUnknownRequest) {
+			toast = "This request is no longer pending."
+		} else {
+			toast = "Could not save approval. Try again or choose Allow once."
+		}
+	}
 	_ = m.bot.AnswerCallbackQuery(ctx, cq.ID, toast)
-	m.resolve(nonce, out, cq.From.ID)
 }
 
 // Run consumes Telegram updates until the context is cancelled. It is the only
