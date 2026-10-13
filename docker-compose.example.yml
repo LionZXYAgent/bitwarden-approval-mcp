@@ -19,6 +19,7 @@ services:
       BWGATE_AGENT_TOKENS_FILE: "/run/secrets/agent_tokens"
       BWGATE_APPROVAL_TIMEOUT_SEC: "120"
       BWGATE_AUDIT_LOG: "/data/audit.log"
+      BWGATE_APPROVALS_FILE: "/data/approvals.json"
       TZ: "Europe/London"
     volumes:
       - bwgate-data:/data

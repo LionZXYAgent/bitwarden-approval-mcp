@@ -6,3 +6,5 @@
 secrets/
 audit.log
 bin/
+
+/approvals.json

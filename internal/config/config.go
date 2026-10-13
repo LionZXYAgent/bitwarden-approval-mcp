@@ -43,6 +43,7 @@ type Config struct {
 	OwnerChatID int64
 
 	// Approval / policy
+	GrantsFile         string
 	Timeout            time.Duration
 	MaxPendingPerAgent int
 	MaxPendingTotal    int
@@ -165,6 +166,7 @@ func Load() (*Config, error) {
 		c.OwnerChatID = c.OwnerUserID
 	}
 
+	c.GrantsFile = envDefault("BWGATE_APPROVALS_FILE", "approvals.json")
 	c.Timeout = time.Duration(atoiDefault(os.Getenv("BWGATE_APPROVAL_TIMEOUT_SEC"), 120)) * time.Second
 	c.MaxPendingPerAgent = atoiDefault(os.Getenv("BWGATE_MAX_PENDING_PER_AGENT"), 3)
 	c.MaxPendingTotal = atoiDefault(os.Getenv("BWGATE_MAX_PENDING_TOTAL"), 20)

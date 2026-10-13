@@ -216,12 +216,12 @@ func (s *Server) Register(m *mcp.Server) {
 
 	mcp.AddTool(m, &mcp.Tool{
 		Name:        "get_credential",
-		Description: "Request one or more secret fields of a vault item (username, password, totp, notes, uris, field:<name>). The vault owner must approve the request on Telegram before any value is returned; the call blocks until they allow, decline, or it times out.",
+		Description: "Request one or more secret fields of a vault item (username, password, totp, notes, uris, field:<name>). Requires owner approval on Telegram or an active saved approval for this agent, item, and requested fields. Without a saved approval, the call blocks until the owner decides or it times out.",
 	}, s.getCredential)
 
 	mcp.AddTool(m, &mcp.Tool{
 		Name:        "get_totp",
-		Description: "Request the current time-based one-time code (2FA) for a vault item. Requires owner approval on Telegram. Returns the generated code, never the TOTP seed.",
+		Description: "Request the current time-based one-time code (2FA) for a vault item. Requires owner approval on Telegram or an active saved approval for this agent and item covering the totp field. Returns the generated code, never the TOTP seed.",
 	}, s.getTOTP)
 }
 

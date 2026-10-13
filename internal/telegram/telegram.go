@@ -123,11 +123,15 @@ func (c *Client) call(ctx context.Context, method string, params any, out any) e
 }
 
 // SendMessage sends plain text (no parse mode, so agent-supplied text cannot
-// inject formatting or links) with an optional single row of inline buttons.
+// inject formatting or links) with optional inline buttons, one per row.
 func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, buttons []Button) (int, error) {
 	p := map[string]any{"chat_id": chatID, "text": text, "disable_web_page_preview": true}
 	if len(buttons) > 0 {
-		p["reply_markup"] = map[string]any{"inline_keyboard": [][]Button{buttons}}
+		rows := make([][]Button, 0, len(buttons))
+		for _, button := range buttons {
+			rows = append(rows, []Button{button})
+		}
+		p["reply_markup"] = map[string]any{"inline_keyboard": rows}
 	}
 	var m Message
 	if err := c.call(ctx, "sendMessage", p, &m); err != nil {
