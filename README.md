@@ -8,66 +8,91 @@ The owner sees the requesting agent, item, fields, and reason before approving.
 The audit log records requests and approval decisions.
 Secret values go only to the agent, never to Telegram or the audit log.
 
-## Quick start with Docker
+## Install on Alpine
 
-Use a host with Docker Compose, Git, and OpenSSL installed.
-You also need a Bitwarden or Vaultwarden account and a Telegram bot.
-Run the commands below on the host that will run `bwgate`.
+Run these commands as root on the Alpine host that will run `bwgate`.
+You need a Bitwarden or Vaultwarden account and a Telegram bot.
+The service runs as the unprivileged `bwgate` user through OpenRC, Alpine's service manager.
 
 1. Create a bot through @BotFather with `/newbot`. Save its token for step 5.
 2. Get your numeric Telegram user ID through @userinfobot or @RawDataBot.
-3. Send `/start` to your new bot. This lets the bot send approval prompts to your private chat.
-4. Clone the repository:
+3. Send `/start` to your new bot. This lets it send approval prompts to your private chat.
+4. Install the dependencies, build the binary, and install the service script:
 
    ```sh
+   apk add ca-certificates tzdata git openssl go curl
    git clone https://github.com/LionZXYAgent/bitwarden-approval-mcp.git bwgate
    cd bwgate
-   docker build -t bwgate:0.1.0 .
+   CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bwgate ./cmd/bwgate
+   install -m 0755 bwgate /usr/local/bin/bwgate
+   install -m 0755 deploy/bwgate.openrc /etc/init.d/bwgate
    ```
 
-5. Create the secret files. Replace the password and bot token placeholders:
+   The build requires Go 1.26 or later.
+   If the packaged Go is older, Go downloads the required version automatically with the default `GOTOOLCHAIN=auto`.
+   Prebuilt Alpine-compatible binaries are also available from [GitHub Releases](https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases).
+
+5. Create the service user, directories, and secret files. Replace the password and bot token placeholders:
 
    ```sh
-   mkdir -p secrets
-   printf '%s' 'your-bitwarden-master-password' > secrets/bw_password
-   printf '%s' '123456:your-telegram-bot-token' > secrets/tg_token
-   printf '%s' "deployer:$(openssl rand -hex 24)" > secrets/agent_tokens
-   chmod 600 secrets/*
+   addgroup -S bwgate
+   adduser -S -D -H -s /sbin/nologin -G bwgate bwgate
+   install -d -m 0750 -o root -g bwgate /etc/bwgate
+   install -d -m 0700 -o bwgate -g bwgate /etc/bwgate/secrets
+   install -d -m 0750 -o bwgate -g bwgate /var/lib/bwgate /var/log/bwgate
+   printf '%s' 'your-bitwarden-master-password' > /etc/bwgate/secrets/bw_password
+   printf '%s' '123456:your-telegram-bot-token' > /etc/bwgate/secrets/tg_token
+   printf '%s' "deployer:$(openssl rand -hex 24)" > /etc/bwgate/secrets/agent_tokens
+   chown bwgate:bwgate /etc/bwgate/secrets/*
+   chmod 600 /etc/bwgate/secrets/*
    ```
 
-6. Copy the example configuration:
+6. Create `/etc/bwgate/bwgate.env`. Replace the server URL, email, and owner user ID:
 
    ```sh
-   cp docker-compose.example.yml docker-compose.yml
+   cat > /etc/bwgate/bwgate.env <<'ENV'
+   BW_SERVER=https://vault.bitwarden.com
+   BW_EMAIL=you@example.com
+   BW_PASSWORD_FILE=/etc/bwgate/secrets/bw_password
+   TELEGRAM_BOT_TOKEN_FILE=/etc/bwgate/secrets/tg_token
+   TELEGRAM_OWNER_USER_ID=11111111
+   BWGATE_AGENT_TOKENS_FILE=/etc/bwgate/secrets/agent_tokens
+   BWGATE_ADDR=127.0.0.1:8099
+   BWGATE_AUDIT_LOG=/var/lib/bwgate/audit.log
+   BWGATE_APPROVALS_FILE=/var/lib/bwgate/approvals.json
+   TZ=UTC
+   ENV
+   chown root:bwgate /etc/bwgate/bwgate.env
+   chmod 640 /etc/bwgate/bwgate.env
    ```
 
-   Set `BW_SERVER`, `BW_EMAIL`, and `TELEGRAM_OWNER_USER_ID` in `docker-compose.yml`.
-   Keep the `/data` volume for audit logs and saved approvals.
-   Make sure that the container's `bwgate` user can write to `/data`.
-
-7. Start the server and make sure that it responds:
+7. Enable the service at boot, start it, and make sure that it responds:
 
    ```sh
-   docker compose up -d
-   docker compose logs -f
+   rc-update add bwgate default
+   rc-service bwgate start
    curl -s localhost:8099/healthz
    ```
 
    The health response reports `status`, `items`, `pending`, and `locked`.
-   The logs show `vault unlocked` and `serving MCP` after startup.
+   Read `/var/log/bwgate/bwgate.log` for startup errors.
+   Use `rc-service bwgate status` to see whether the service runs.
 
 Only `TELEGRAM_OWNER_USER_ID` can approve requests.
 For group prompts, add the bot to the group and set `TELEGRAM_OWNER_CHAT_ID` to the group ID.
 Do not run another `getUpdates` consumer or webhook with the same bot. A conflict stops the approval loop.
 
-To update, run this one-line command from your existing `bwgate` checkout on the server host:
+## Update on Alpine
+
+Run this one-line command as root from your existing source checkout on the Alpine host:
 
 ```sh
-git pull --ff-only && docker compose up -d --build bwgate
+git pull --ff-only && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bwgate ./cmd/bwgate && rc-service bwgate stop && install -m 0755 bwgate /usr/local/bin/bwgate && rc-service bwgate start
 ```
 
-It updates the current branch, rebuilds the image, and restarts `bwgate`.
-It keeps your existing `docker-compose.yml`, secret files, and `/data` volume.
+It updates the current branch and builds the new binary before stopping the service.
+It replaces the binary, then starts `bwgate` again.
+Your configuration, secret files, audit log, and saved approvals stay in place.
 
 ## Tools and approvals
 
@@ -116,7 +141,7 @@ Revocation does not remove secret copies already returned to agents.
 ## Connect an agent
 
 Clients connect to `http://127.0.0.1:8099/mcp` with a bearer token, an access key sent with each request.
-Use the token after `deployer:` in `secrets/agent_tokens`.
+Use the token after `deployer:` in `/etc/bwgate/secrets/agent_tokens`.
 Give each agent a separate name and token so approvals remain separate.
 
 For OpenClaw, add this configuration under `mcp.servers`.
@@ -177,45 +202,6 @@ The file takes precedence. See [.env.example](.env.example) for a starting confi
 | `BWGATE_SYNC_INTERVAL_SEC` | `900` | Vault refresh interval. `0` disables refresh. |
 | `BWGATE_AUDIT_LOG` | `-` | Audit file path. `-` writes to standard error. |
 | `TZ` | `UTC` | Time zone for approval messages. |
-
-## Run without Docker
-
-Download a binary and `SHA256SUMS` from [GitHub Releases](https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases).
-A checksum detects changes in a downloaded file.
-Make sure that the checksum matches before installing the binary.
-Releases support Linux amd64/arm64/armv7, macOS amd64/arm64, and Windows amd64.
-
-To build from source, install Go 1.26 or later and run this command in the repository:
-
-```sh
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bwgate ./cmd/bwgate
-```
-
-For a service, create the `bwgate` user and install the binary at `/usr/local/bin/bwgate`.
-Put configuration in `/etc/bwgate/bwgate.env`, with secrets in files referenced by `*_FILE`.
-Use plain `KEY=value` lines without inline comments for systemd.
-Make sure that `bwgate` can read the secret files and write its audit and approval files.
-Use `/var/lib/bwgate/approvals.json` for `BWGATE_APPROVALS_FILE`.
-
-Use the supplied service file for your host:
-
-- Alpine: Install [deploy/bwgate.openrc](deploy/bwgate.openrc) as `/etc/init.d/bwgate` and make it executable.
-- Linux with systemd: Install [deploy/bwgate.service](deploy/bwgate.service) in `/etc/systemd/system/`.
-- Other hosts: Set the environment variables and run `bwgate` directly.
-
-On Alpine, install `ca-certificates` and `tzdata`, then enable and start the service:
-
-```sh
-rc-update add bwgate default
-rc-service bwgate start
-```
-
-On systemd hosts, enable and start the service after installing its unit file:
-
-```sh
-systemctl daemon-reload
-systemctl enable --now bwgate
-```
 
 ## Limits and development
 
