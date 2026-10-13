@@ -102,6 +102,8 @@ curl -s localhost:8099/healthz   # {"status":"ok","items":N,"pending":0,"locked"
 
 ### Option B — bare Alpine + OpenRC
 
+See [Run as a service (start on boot)](#run-as-a-service-start-on-boot) for the full setup.
+
 ```sh
 # Build a static binary (on any machine with Go 1.26+ (toolchain auto-downloads)):
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bwgate ./cmd/bwgate
@@ -121,6 +123,100 @@ rc-service bwgate start
 ```
 
 ---
+
+## Run as a service (start on boot)
+
+### Alpine / OpenRC
+
+The init script [`deploy/bwgate.openrc`](deploy/bwgate.openrc) expects:
+
+| What | Path |
+|---|---|
+| Binary | `/usr/local/bin/bwgate` |
+| Service user/group | `bwgate:bwgate` |
+| Env file (shell-sourced, `KEY=value`) | `/etc/bwgate/bwgate.env` |
+| Secret files | `/etc/bwgate/secrets/*` (referenced via `*_FILE`) |
+| Log (stdout+stderr) | `/var/log/bwgate/bwgate.log` |
+| State / audit log | `/var/lib/bwgate/` |
+
+Run as root:
+
+```sh
+apk add ca-certificates tzdata
+
+# 1. Binary (use _linux_arm64 / _linux_armv7 on ARM)
+V=0.1.0; cd /tmp
+wget https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases/download/v$V/bwgate_${V}_linux_amd64.tar.gz
+wget https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases/download/v$V/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf bwgate_${V}_linux_amd64.tar.gz
+install -m 0755 bwgate_${V}_linux_amd64/bwgate /usr/local/bin/bwgate
+
+# 2. Dedicated system user (no login, no home)
+addgroup -S bwgate
+adduser -S -D -H -h /var/lib/bwgate -s /sbin/nologin -G bwgate bwgate
+
+# 3. Config + secrets, readable only by bwgate
+install -d -m 0750 -o root -g bwgate /etc/bwgate
+install -d -m 0700 -o bwgate -g bwgate /etc/bwgate/secrets
+printf '%s' 'your-master-password'      > /etc/bwgate/secrets/bw_password
+printf '%s' '123456:telegram-bot-token' > /etc/bwgate/secrets/tg_token
+printf '%s' "deployer:$(openssl rand -hex 24)" > /etc/bwgate/secrets/agent_tokens
+cat > /etc/bwgate/bwgate.env <<'ENV'
+BW_SERVER=https://vault.bitwarden.com
+BW_EMAIL=you@example.com
+BW_PASSWORD_FILE=/etc/bwgate/secrets/bw_password
+TELEGRAM_BOT_TOKEN_FILE=/etc/bwgate/secrets/tg_token
+TELEGRAM_OWNER_USER_ID=11111111
+BWGATE_AGENT_TOKENS_FILE=/etc/bwgate/secrets/agent_tokens
+BWGATE_ADDR=127.0.0.1:8099
+BWGATE_AUDIT_LOG=/var/lib/bwgate/audit.log
+ENV
+chown bwgate:bwgate /etc/bwgate/bwgate.env /etc/bwgate/secrets/*
+chmod 600 /etc/bwgate/bwgate.env /etc/bwgate/secrets/*
+
+# 4. Init script, enable at boot, start
+wget -O /etc/init.d/bwgate https://raw.githubusercontent.com/LionZXYAgent/bitwarden-approval-mcp/master/deploy/bwgate.openrc
+chmod 0755 /etc/init.d/bwgate
+rc-update add bwgate default
+rc-service bwgate start
+```
+
+The script creates `/var/log/bwgate` and `/var/lib/bwgate` itself, waits for `net`, and runs the binary as `bwgate`
+(not root). Use a different env file with `BWGATE_ENV_FILE=/path` in `/etc/conf.d/bwgate`.
+
+Status and logs:
+
+```sh
+rc-service bwgate status
+tail -f /var/log/bwgate/bwgate.log   # look for "vault unlocked" and "serving MCP"
+curl -s localhost:8099/healthz
+```
+
+Confirm it starts on boot:
+
+```sh
+rc-update show default | grep bwgate   # bwgate | default
+reboot
+# after reboot:
+rc-service bwgate status && curl -s localhost:8099/healthz
+```
+
+### systemd (Debian, Ubuntu, etc.)
+
+Same user, `/etc/bwgate/bwgate.env` and secrets as above (on Debian use
+`useradd --system --no-create-home --shell /usr/sbin/nologin bwgate`). The env file must be plain `KEY=value`
+lines: systemd does not allow inline comments. The unit [`deploy/bwgate.service`](deploy/bwgate.service) is hardened
+(`NoNewPrivileges`, `ProtectSystem=strict`, no capabilities, syscall filter) and restarts on failure.
+
+```sh
+install -m 0644 deploy/bwgate.service /etc/systemd/system/bwgate.service
+systemctl daemon-reload
+systemctl enable --now bwgate
+systemctl status bwgate
+journalctl -u bwgate -f
+systemctl is-enabled bwgate   # enabled = starts on boot
+```
 
 ## Create the Telegram bot
 

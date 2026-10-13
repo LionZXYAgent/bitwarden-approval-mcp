@@ -1,0 +1,52 @@
+# systemd unit for the Bitwarden approval MCP gateway.
+# Install as /etc/systemd/system/bwgate.service, then:
+#   systemctl daemon-reload && systemctl enable --now bwgate
+[Unit]
+Description=Bitwarden vault access MCP server with Telegram approval
+Documentation=https://github.com/LionZXYAgent/bitwarden-approval-mcp
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bwgate
+Group=bwgate
+# KEY=value lines, no quotes or inline comments; secrets via *_FILE.
+EnvironmentFile=/etc/bwgate/bwgate.env
+ExecStart=/usr/local/bin/bwgate
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+StateDirectory=bwgate
+StateDirectoryMode=0750
+LogsDirectory=bwgate
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

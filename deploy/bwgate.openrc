@@ -13,6 +13,8 @@ command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/bwgate/bwgate.log"
 error_log="/var/log/bwgate/bwgate.log"
+retry="TERM/15/KILL/5"
+umask=077
 
 # Load environment (including *_FILE pointers to secret files).
 : "${BWGATE_ENV_FILE:=/etc/bwgate/bwgate.env}"
@@ -27,7 +29,8 @@ export_env() {
 
 depend() {
     need net
-    after firewall
+    use dns
+    after firewall ntpd chronyd
 }
 
 start_pre() {
