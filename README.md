@@ -60,6 +60,15 @@ Only `TELEGRAM_OWNER_USER_ID` can approve requests.
 For group prompts, add the bot to the group and set `TELEGRAM_OWNER_CHAT_ID` to the group ID.
 Do not run another `getUpdates` consumer or webhook with the same bot. A conflict stops the approval loop.
 
+To update, run this one-line command from your existing `bwgate` checkout on the server host:
+
+```sh
+git pull --ff-only && docker compose up -d --build bwgate
+```
+
+It updates the current branch, rebuilds the image, and restarts `bwgate`.
+It keeps your existing `docker-compose.yml`, secret files, and `/data` volume.
+
 ## Tools and approvals
 
 Search returns item details but no secret values.
