@@ -352,3 +352,70 @@ func TestGetTOTP(t *testing.T) {
 		t.Fatal("totp seed leaked")
 	}
 }
+
+// TestMultipleApprovals guards against the mock (or server) only honouring the
+// first Allow press: several sequential, then concurrent, gated requests must
+// each get their own prompt and all be approved.
+func TestMultipleApprovals(t *testing.T) {
+	h := setup(t)
+	cs := h.connect(t, agentToken)
+	call := func() (*mcp.CallToolResult, error) {
+		return cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "get_credential",
+			Arguments: map[string]any{"item": "GitHub", "fields": []string{"password"}, "reason": "multi"}})
+	}
+	check := func(res *mcp.CallToolResult, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("call: %v", err)
+		}
+		out := decode[struct {
+			Fields map[string]string `json:"fields"`
+		}](t, res)
+		if out.Fields["password"] != "ghp_secretvalue123" {
+			t.Fatalf("not approved: %s", resultText(res))
+		}
+	}
+	// pressAll keeps pressing Allow on every open prompt until n were pressed.
+	pressAll := func(n int) {
+		pressed := map[int]bool{}
+		deadline := time.Now().Add(5 * time.Second)
+		for len(pressed) < n && time.Now().Before(deadline) {
+			for _, id := range h.tg.OpenPrompts() {
+				if !pressed[id] && h.tg.PressMessage(id, owner, "allow") {
+					pressed[id] = true
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if len(pressed) < n {
+			t.Errorf("only %d/%d prompts appeared", len(pressed), n)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		go pressAll(1)
+		res, err := call()
+		check(res, err)
+	}
+
+	const n = 4
+	type rr struct {
+		res *mcp.CallToolResult
+		err error
+	}
+	results := make(chan rr, n)
+	for i := 0; i < n; i++ {
+		go func() { r, e := call(); results <- rr{r, e} }()
+	}
+	pressAll(n)
+	for i := 0; i < n; i++ {
+		r := <-results
+		check(r.res, r.err)
+	}
+	if c := h.tg.MessageCount(); c != 3+n {
+		t.Fatalf("expected %d prompts, got %d", 3+n, c)
+	}
+	if left := h.tg.OpenPrompts(); len(left) != 0 {
+		t.Fatalf("prompts left un-edited: %v", left)
+	}
+}

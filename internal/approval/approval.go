@@ -66,6 +66,7 @@ type Request struct {
 	Expires time.Time
 
 	nonce     string
+	decidedBy int64
 	messageID int
 	outcome   Outcome
 	done      chan struct{}
@@ -192,8 +193,22 @@ func (m *Manager) Request(ctx context.Context, r *Request) (Outcome, error) {
 	}
 	m.mu.Lock()
 	r.messageID = msgID
-	r.timer = time.AfterFunc(time.Until(r.Expires), func() { m.resolve(r.nonce, TimedOut, 0) })
+	var lateEdit string
+	if r.outcome == Pending {
+		r.timer = time.AfterFunc(time.Until(r.Expires), func() { m.resolve(r.nonce, TimedOut, 0) })
+	} else {
+		// A press was handled before sendMessage returned here, so resolve()
+		// saw no message id; edit the prompt now so it doesn't keep its buttons.
+		lateEdit = m.renderResult(r, r.outcome, r.decidedBy)
+	}
 	m.mu.Unlock()
+	if lateEdit != "" {
+		ectx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := m.bot.EditMessageText(ectx, m.cfg.OwnerChatID, msgID, lateEdit); err != nil {
+			m.log.Warn("edit telegram message failed", "err", err)
+		}
+		cancel()
+	}
 
 	select {
 	case <-r.done:
@@ -216,6 +231,7 @@ func (m *Manager) resolve(nonce string, out Outcome, byUser int64) {
 		return
 	}
 	m.finishLocked(r, out, "")
+	r.decidedBy = byUser
 	chatID, msgID := m.cfg.OwnerChatID, r.messageID
 	text := m.renderResult(r, out, byUser)
 	m.mu.Unlock()

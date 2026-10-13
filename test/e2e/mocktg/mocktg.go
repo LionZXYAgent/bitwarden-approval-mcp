@@ -6,6 +6,7 @@ package mocktg
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,9 +30,17 @@ type Server struct {
 	sent map[int]*Sent
 	last int // last message id
 
-	updates []map[string]any
+	updates []update
 	updID   int64
+	cbID    int64
 	toasts  []string
+}
+
+// update is a queued Telegram update with a typed update_id, so the offset
+// filter in getUpdates always compares real values.
+type update struct {
+	UpdateID      int64          `json:"update_id"`
+	CallbackQuery map[string]any `json:"callback_query"`
 }
 
 // New starts the mock server.
@@ -88,12 +97,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		deadline := time.Now().Add(1 * time.Second)
 		for {
 			s.mu.Lock()
-			var out []map[string]any
+			// Like Telegram: an offset confirms (drops) all earlier updates.
+			kept := s.updates[:0]
 			for _, u := range s.updates {
-				if toInt64(u["update_id"]) >= offset {
-					out = append(out, u)
+				if u.UpdateID >= offset {
+					kept = append(kept, u)
 				}
 			}
+			s.updates = kept
+			out := append([]update{}, kept...)
 			s.mu.Unlock()
 			if len(out) > 0 || time.Now().After(deadline) {
 				ok(out)
@@ -110,8 +122,17 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 // last-sent message, choosing the button whose label contains want.
 func (s *Server) Press(user int64, want string) bool {
 	s.mu.Lock()
+	id := s.last
+	s.mu.Unlock()
+	return s.PressMessage(id, user, want)
+}
+
+// PressMessage delivers a press on a specific message. Each press gets its own
+// update_id and callback id, and carries the message it belongs to.
+func (s *Server) PressMessage(id int, user int64, want string) bool {
+	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := s.sent[s.last]
+	m := s.sent[id]
 	if m == nil {
 		return false
 	}
@@ -125,15 +146,37 @@ func (s *Server) Press(user int64, want string) bool {
 		return false
 	}
 	s.updID++
-	s.updates = append(s.updates, map[string]any{
-		"update_id": s.updID,
-		"callback_query": map[string]any{
-			"id":   "cb",
-			"from": map[string]any{"id": user, "is_bot": false, "first_name": "tester"},
-			"data": data,
-		},
-	})
+	s.cbID++
+	s.updates = append(s.updates, update{UpdateID: s.updID, CallbackQuery: map[string]any{
+		"id":      fmt.Sprintf("cb-%d", s.cbID),
+		"from":    map[string]any{"id": user, "is_bot": false, "first_name": "tester"},
+		"message": map[string]any{"message_id": m.MessageID, "chat": map[string]any{"id": m.ChatID}},
+		"data":    data,
+	}})
 	return true
+}
+
+// OpenPrompts returns ids of messages that still have inline buttons.
+func (s *Server) OpenPrompts() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ids []int
+	for id, m := range s.sent {
+		if len(m.Buttons) > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// Text returns the current text of message id.
+func (s *Server) Text(id int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if m := s.sent[id]; m != nil {
+		return m.Text
+	}
+	return ""
 }
 
 // LastText returns the text of the last message (after any edits).

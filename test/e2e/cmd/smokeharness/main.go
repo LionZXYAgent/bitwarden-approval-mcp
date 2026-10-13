@@ -56,8 +56,17 @@ type mockTG struct {
 	mu     sync.Mutex
 	next   int
 	sent   map[int]map[string]string // id -> label:callbackdata
-	queued []map[string]any
+	queued []update
 	updID  int64
+	cbID   int64
+}
+
+// update is a queued Telegram update. update_id is kept as a typed int64 so the
+// getUpdates offset filter compares real values (a map[string]any round-trip
+// previously turned it into 0, so only the first callback was ever delivered).
+type update struct {
+	UpdateID      int64          `json:"update_id"`
+	CallbackQuery map[string]any `json:"callback_query"`
 }
 
 func (m *mockTG) handle(w http.ResponseWriter, r *http.Request) {
@@ -78,12 +87,13 @@ func (m *mockTG) handle(w http.ResponseWriter, r *http.Request) {
 		for label, data := range btns {
 			if strings.Contains(strings.ToLower(label), "allow") {
 				m.updID++
-				m.queued = append(m.queued, map[string]any{
-					"update_id": m.updID,
-					"callback_query": map[string]any{"id": "cb",
-						"from": map[string]any{"id": ownerID, "is_bot": false, "first_name": "owner"},
-						"data": data},
-				})
+				m.cbID++
+				m.queued = append(m.queued, update{UpdateID: m.updID, CallbackQuery: map[string]any{
+					"id":      fmt.Sprintf("cb-%d", m.cbID),
+					"from":    map[string]any{"id": ownerID, "is_bot": false, "first_name": "owner"},
+					"message": map[string]any{"message_id": id, "chat": map[string]any{"id": ownerID}},
+					"data":    data}})
+				break // press exactly one Allow button per prompt
 			}
 		}
 		m.mu.Unlock()
@@ -93,12 +103,15 @@ func (m *mockTG) handle(w http.ResponseWriter, r *http.Request) {
 		offset := toI64(body["offset"])
 		for {
 			m.mu.Lock()
-			var out []map[string]any
+			// Like Telegram: an offset confirms (drops) all earlier updates.
+			kept := m.queued[:0]
 			for _, u := range m.queued {
-				if toI64(u["update_id"]) >= offset {
-					out = append(out, u)
+				if u.UpdateID >= offset {
+					kept = append(kept, u)
 				}
 			}
+			m.queued = kept
+			out := append([]update{}, kept...)
 			m.mu.Unlock()
 			if len(out) > 0 || time.Now().After(deadline) {
 				ok(out)
