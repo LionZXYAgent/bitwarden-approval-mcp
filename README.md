@@ -62,6 +62,24 @@ image. See [Testing](#testing).
 
 ---
 
+## Download release binaries
+
+Prebuilt static binaries (`CGO_ENABLED=0`, no libc dependency, run on Alpine as-is) are attached to each
+[GitHub release](https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases) for
+linux amd64/arm64/armv7, macOS amd64/arm64 and Windows amd64, with a `SHA256SUMS` file.
+
+```sh
+V=0.1.0
+wget https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases/download/v$V/bwgate_${V}_linux_amd64.tar.gz
+wget https://github.com/LionZXYAgent/bitwarden-approval-mcp/releases/download/v$V/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+tar xzf bwgate_${V}_linux_amd64.tar.gz
+install -m 0755 bwgate_${V}_linux_amd64/bwgate /usr/local/bin/bwgate
+bwgate --version
+```
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
+
 ## Quick start on Alpine
 
 ### Option A — Docker (recommended)

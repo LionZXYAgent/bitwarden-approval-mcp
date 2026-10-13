@@ -29,6 +29,16 @@ import (
 var version = "0.1.0"
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-version", "version":
+			fmt.Println("bwgate " + version)
+			return
+		case "--help", "-help", "-h", "help":
+			fmt.Println("bwgate " + version + ": Telegram-gated Bitwarden vault MCP server.\nConfigured via environment variables; see README.md.")
+			return
+		}
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "bwgate: "+err.Error())
 		os.Exit(1)
